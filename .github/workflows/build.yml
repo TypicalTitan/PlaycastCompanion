@@ -1,0 +1,32 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build
+        run: dotnet build -c Release
+
+      - name: Publish self-contained single-file
+        run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o installer/payload
+
+      - name: Upload payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlaycastCompanion-win-x64
+          path: installer/payload
+
+      # The NSIS setup is built locally (installer\build-setup.cmd); add
+      # `choco install nsis` + makensis here if you want CI to produce it too.

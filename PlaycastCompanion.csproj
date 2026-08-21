@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- Windows 10 SDK TFM: needed for Windows.Devices.Lights (Dynamic Lighting) -->
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>PlaycastCompanion</AssemblyName>
+    <RootNamespace>PlaycastCompanion</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <Version>2.4.0</Version>
+    <Product>Playcast Companion</Product>
+    <Company>TypicalTitan</Company>
+    <Authors>Stepan Varganov (TypicalTitan)</Authors>
+    <RepositoryUrl>https://github.com/TypicalTitan/PlaycastCompanion</RepositoryUrl>
+    <AssemblyTitle>Playcast Companion</AssemblyTitle>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Update="config.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <EmbeddedResource Include="Assets\**\*.png" />
+  </ItemGroup>
+
+</Project>

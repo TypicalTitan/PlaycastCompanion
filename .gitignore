@@ -1,0 +1,17 @@
+# build output
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# installer artifacts (built locally; releases are attached to GitHub Releases)
+installer/payload/
+installer/*.exe
+
+# Personal / proprietary artwork is NEVER committed. The app has original drawn
+# fallbacks for everything; see Assets/brands/README.md.
+Assets/squid.png
+Assets/brands/*
+!Assets/brands/README.md
+discord-assets/
