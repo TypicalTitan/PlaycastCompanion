@@ -61,6 +61,10 @@ the Discord status clears.
    Produces `installer\PlaycastCompanionSetup-<version>.exe`. The script runs
    step 3 and the NSIS compile for you and fails loudly if anything is missing.
 
+**Releasing:** build release binaries from a *clean clone*, never from a working
+tree that has local `Assets/brands` art — local art is embedded into local builds
+by design, and must not ship.
+
 CI does steps 1–3 on every push (`.github/workflows/build.yml`) and uploads the
 payload as an artifact, so a green check means the repo builds from scratch.
 
