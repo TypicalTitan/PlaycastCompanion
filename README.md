@@ -10,12 +10,21 @@ machine look neutral: **every RGB lighting ecosystem you enable goes dark**, and
 guest session ends, everything hands back — Synapse/iCUE/GG profiles return and
 the Discord status clears.
 
-- Detects the guest session from Windows itself (WTS session notifications) —
-  it never touches or modifies Playcast.
+**Downloads:** [regular 2.5.0](https://github.com/TypicalTitan/PlaycastCompanion/releases/tag/v2.5.0)
+and [Native 3.2.0](https://github.com/TypicalTitan/PlaycastCompanion-cpp/releases/tag/v3.2.0).
+Both include the sidebar, session logger and local log analyzer. Choose one:
+they use the same installation folder and compatible configuration.
+
+- Detects the guest session through Windows WTS notifications. Full realtime
+  capture optionally consumes a diagnostic feed from an instrumented Playcast host.
 - Lighting: **Razer Chroma**, **SteelSeries GameSense**, **Logitech G**,
   **Corsair iCUE**, **OpenRGB** (motherboards, RAM, GPUs…), and **Windows
   Dynamic Lighting**, each individually selectable and safe to run together.
 - Discord Rich Presence with an optional "Hosting *{game}* in Nonsole Mode" line.
+- Automatic session logs with local game/process snapshots and an optional
+  Playcast diagnostic feed for complete realtime messages and PowerShell deployments.
+- A resizable sidebar window with compact lighting rows, Save/Discard, and
+  local JSONL import with timeline, communication, scripts, games and health views.
 - Runs unelevated, starts with Windows for every account, headless in the guest
   session, dark-themed settings window in yours.
 
@@ -86,14 +95,46 @@ contains `PlaycastCompanion.exe`), and the current user's log folder.
 
 1. Launch it (Start Menu, or the exe). A dark settings window opens; the tray
    icon is the app mark — bright when idle, dimmed while a guest is hosting.
-2. **Advanced tab → Guest account name**: the Windows account your host signs
+2. **Settings → Guest account name**: the Windows account your host signs
    guests into (default `NonsoleMode`). Case-insensitive.
-3. **Lighting tab**: tick the ecosystems you own.
-4. **Discord tab** (optional): see *Discord* below.
+3. **Lighting**: include the ecosystems you own.
+4. **Discord** (optional): see *Discord* below.
 5. **Save**. Lighting and Discord toggles apply immediately; account/registry
    changes take effect on restart (the app offers one).
-6. **Status tab → Preview guest mode (10 s)** runs the full effect so you can
-   see it without a real guest.
+6. **Overview → Preview guest mode (10 s)** runs the full effect so you can
+  see it without a real guest.
+
+## Sidebar and log analysis
+
+Overview shows the actual guest and integration state. Lighting uses six
+consistent rows; Discord, Session logs and Settings keep their own controls.
+Save remains visible on settings pages, and Discard restores pending edits.
+Analyze logs leaves live settings unchanged.
+
+![Sidebar and compact lighting rows](docs/screenshots/lighting.png)
+![Imported session timeline](docs/screenshots/analyze-timeline.png)
+
+Open **Analyze logs → Import log files** for one or more `.jsonl`, `.ndjson`
+or `.log` files, including rotated category files. **Import folder** reads a
+session folder and its subfolders; files/folders can also be dropped onto the
+analyzer. **Sample session** loads synthetic data. Parsing runs in the background
+and never uploads logs or executes captured scripts.
+
+| View | What it shows |
+|---|---|
+| Timeline | Stored records on a UTC category timeline, plus a selectable record list. |
+| Communication | Realtime and IPC messages with complete available payloads. |
+| Scripts | Linked deployment phases, status, observed runtime, script text, stdout/stderr and exit codes. Matching dedicated/realtime copies count once. Native phases without a shared identifier remain separate; launch acceptance is distinct from completion. |
+| Games | Latest passive installed inventory, matched running games/processes, and source coverage. |
+| Health | Companion working set (MiB), cumulative CPU time (seconds), and capture failures. Missing measurements remain unavailable. |
+
+Select a row or plotted point to inspect the source filename/line and JSON.
+The inspector limits its preview to 100,000 characters. Imports are bounded to
+128 MiB, 50,000 valid records, 10 MiB per line and 5,000 selected files.
+Invalid/unreadable records produce warnings while valid records remain usable;
+an import with no valid records retains the previous view. Records captured
+with secrets enabled are explicitly flagged. Game inventory is an observed
+snapshot at its recorded time, not a claim about the machine's current state.
 
 ## How it works
 
@@ -110,6 +151,65 @@ Two instances coexist by design (one per Windows session, `Local\` mutex): the
 one in the guest session runs **headless** — no tray icon, no window, nothing
 for a guest to click — and holds the blackout independently of the one in your
 session.
+
+## Session logs
+
+Logging starts automatically when the configured guest account signs in and
+closes when its session ends. Each observed Windows guest session gets a new
+folder under `%LOCALAPPDATA%\PlaycastCompanion\sessions`. Starting Companion
+during a session records the remaining portion; events before startup are
+unavailable. A Companion restart creates another log segment.
+
+Use **Session logs** in settings to see capture status, open the folder, set
+the snapshot interval, or disable automatic logging. The **Debug: include
+credentials and tokens** checkbox immediately changes the policy for new
+records; previously written records retain their original contents. This debug
+toggle is process-local and resets after restart. Secrets are redacted by default: credential
+fields, nested JSON, bearer tokens, JWTs, private keys and common PowerShell
+secret assignments/arguments. Redaction is best effort for arbitrary script
+text or output; avoid sharing raw debug logs without reviewing them.
+
+Files contain one timestamped JSON object per line:
+
+| File | Contents |
+|---|---|
+| `session.jsonl` | Start/end, Windows session identity and capture policy changes. |
+| `realtime.jsonl` | Realtime WebSocket messages and host HTTP requests/responses, including authentication and provisioning. |
+| `ipc.jsonl` | Host/native messages visible through the Electron IPC boundary. |
+| `scripts.jsonl` | PowerShell deployment bodies, started/result/revoke events, stdout/stderr, exit status and execution IDs. |
+| `games.jsonl` | Installed/running game snapshots and Playcast game catalog/launch state. |
+| `diagnostics.jsonl` | Connection transitions, host/matchmaking/driver/display state, resource snapshots, Companion backend status and capture failures. |
+
+**Full realtime and script capture requires the Playcast host diagnostic hook.**
+Rebuild both `host-frontend` and `host-electron` from `playcast-apps-1` with
+the hook included; a stock Playcast release does not expose that feed.
+The guest host sends an ACL-protected, local named-pipe feed to the Companion
+instance in the owner's account. Keep owner Companion running for realtime
+capture. The headless guest instance records its own machine snapshots in
+the guest profile; it reports that realtime capture belongs to the owner.
+The logger accepts diagnostic data only and never executes captured scripts.
+Feed frames are bounded to 1 MiB. Oversized traffic and unreadable or binary
+HTTP request bodies produce drop/omission markers rather than partial scripts.
+
+Local inventory reads Steam library/app manifests and Epic installation
+manifests. It does not claim to cover GOG, Xbox, EA, Ubisoft or standalone
+games without a Playcast catalog entry. Running-game detection matches
+executables under known install roots in the target Windows session, and
+records access failures and unknown coverage. Playcast's game launch state
+and running-window list are additional signals, not proof that every game
+process was observed.
+
+Snapshots run every 30 seconds by default. Category files rotate at 10 MiB;
+each session is capped at 100 MiB, with an explicit limit marker when capture
+stops. Expired generated session folders are removed after 14 days when a
+new session starts. Session folders permit only their owner and SYSTEM;
+logs stay on the PC. `SessionLogging` in `config.json` controls these defaults.
+
+Contract checks run without test packages:
+
+```powershell
+dotnet run --project Tests/PlaycastCompanion.ContractTests.csproj -c Release
+```
 
 ## Lighting engines
 
@@ -189,7 +289,9 @@ clamped on load. Most are editable from the window.
 
 ## Dev harness flags
 
-- `--snapshot <dir>` renders every settings tab to PNG (review UI without a desktop).
+- `--snapshot <dir>` renders all sidebar pages to PNG without starting lighting,
+  Discord or capture. Add `--snapshot-log <file>` to render all five analyzer
+  views against a capture.
 - `--lamps [file]` lists every LampArray device the OS exposes and whether the app can drive it.
 - `--autostart` quiet start (used by the Run key); a second manual launch just
   raises the running instance's window.
