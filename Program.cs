@@ -28,7 +28,7 @@ static class Program
             ApplicationConfiguration.Initialize();
             var dir = snapshotIdx + 1 < args.Length ? args[snapshotIdx + 1] : Path.GetTempPath();
             using var snapshotEvent = new EventWaitHandle(false, EventResetMode.AutoReset);
-            var ctx = new TrayAppContext(false, snapshotEvent);
+            var ctx = new TrayAppContext(false, snapshotEvent, diagnosticsOnly: true);
             var form = new MainForm(ctx)
             {
                 StartPosition = FormStartPosition.Manual,
@@ -36,6 +36,8 @@ static class Program
             };
             form.Show();
             Application.DoEvents();
+            int captureIdx = Array.FindIndex(args, argument => argument.Equals("--snapshot-log", StringComparison.OrdinalIgnoreCase));
+            if (captureIdx >= 0 && captureIdx + 1 < args.Length) form.LoadCaptureForSnapshot(args[captureIdx + 1]);
             form.SaveSnapshots(dir);
             Application.Exit(); // hides the tray icon via ApplicationExit
             return;

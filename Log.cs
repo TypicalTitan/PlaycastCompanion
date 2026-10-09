@@ -8,9 +8,15 @@ public static class Log
     private static readonly string LogPath = Path.Combine(Dir, "playcast-companion.log");
 
     public static string LogFilePath => LogPath;
+    public static event Action<string>? MessageLogged;
 
     public static void Info(string message)
     {
+        // Subscribers are isolated from the ordinary log and from one another.
+        foreach (var subscriber in MessageLogged?.GetInvocationList() ?? [])
+        {
+            try { ((Action<string>)subscriber)(message); } catch { }
+        }
         lock (Gate)
         {
             try

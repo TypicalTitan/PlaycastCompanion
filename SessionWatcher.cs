@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 using System.Windows.Forms;
 
 namespace PlaycastCompanion;
@@ -57,15 +58,21 @@ public sealed class SessionWatcher : NativeWindow, IDisposable
         base.WndProc(ref m);
     }
 
-    public bool IsTargetUserLoggedOn()
+    public bool IsTargetUserLoggedOn() => GetTargetSessionIds().Count > 0;
+
+    public IReadOnlyList<int> GetTargetSessionIds()
     {
         // If this instance itself runs under the target account, blackout applies
         // for the whole lifetime of the process.
         if (string.Equals(Environment.UserName, _targetUser, StringComparison.OrdinalIgnoreCase))
-            return true;
+        {
+            using var current = Process.GetCurrentProcess();
+            return [current.SessionId];
+        }
 
         if (!WTSEnumerateSessionsW(IntPtr.Zero, 0, 1, out var pInfo, out var count))
-            return false;
+            return [];
+        var sessions = new List<int>();
         try
         {
             var size = Marshal.SizeOf<WTS_SESSION_INFO>();
@@ -75,14 +82,14 @@ public sealed class SessionWatcher : NativeWindow, IDisposable
                 if (!CountsAsLoggedOn((ConnectState)info.State))
                     continue;
                 if (string.Equals(GetSessionUser(info.SessionId), _targetUser, StringComparison.OrdinalIgnoreCase))
-                    return true;
+                    sessions.Add(info.SessionId);
             }
         }
         finally
         {
             WTSFreeMemory(pInfo);
         }
-        return false;
+        return sessions;
     }
 
     private bool CountsAsLoggedOn(ConnectState state) =>

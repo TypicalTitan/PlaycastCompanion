@@ -19,6 +19,9 @@ jobs:
       - name: Build
         run: dotnet build -c Release
 
+      - name: Session logging contracts
+        run: dotnet run --project Tests/PlaycastCompanion.ContractTests.csproj -c Release
+
       - name: Publish self-contained single-file
         run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o installer/payload
 
@@ -28,5 +31,17 @@ jobs:
           name: PlaycastCompanion-win-x64
           path: installer/payload
 
-      # The NSIS setup is built locally (installer\build-setup.cmd); add
-      # `choco install nsis` + makensis here if you want CI to produce it too.
+      - name: Install NSIS
+        run: choco install nsis --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" installer/installer.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlaycastCompanion-setup-win-x64
+          path: installer/PlaycastCompanionSetup-*.exe

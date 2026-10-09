@@ -11,7 +11,7 @@
     <AssemblyName>PlaycastCompanion</AssemblyName>
     <RootNamespace>PlaycastCompanion</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <Version>2.4.0</Version>
+    <Version>2.5.0</Version>
     <Product>Playcast Companion</Product>
     <Company>TypicalTitan</Company>
     <Authors>Stepan Varganov (TypicalTitan)</Authors>
@@ -25,8 +25,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="Tests\**\*.cs" />
     <None Update="config.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <EmbeddedResource Include="Assets\**\*.png" />
+    <EmbeddedResource Include="Assets\sample-session.jsonl" />
   </ItemGroup>
 
 </Project>

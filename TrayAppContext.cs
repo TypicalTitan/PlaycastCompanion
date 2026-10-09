@@ -13,6 +13,7 @@ public sealed class TrayAppContext : ApplicationContext
     private readonly DiscordShimServer? _shim;
     private readonly DiscordChannelListener? _channel;
     private readonly SessionWatcher _sessions;
+    private readonly SessionLogger _sessionLogger;
     private readonly RegistryWatcher? _registry;
     private readonly System.Windows.Forms.Timer _pollTimer;
     private readonly SemaphoreSlim _evalGate = new(1, 1);
@@ -21,10 +22,12 @@ public sealed class TrayAppContext : ApplicationContext
     private readonly Icon _iconIdle;
     private readonly Icon _iconStealth;
     private MainForm? _form;
+    private readonly bool _diagnosticsOnly;
 
     public AppConfig Config => _cfg;
     public IReadOnlyList<ILightingBackend> Lighting => _lighting;
     public DiscordPresence? Discord => _discord;
+    public SessionLogger SessionLogging => _sessionLogger;
     public bool GuestActive { get; private set; }
     public Image SquidImage { get; }
     public Icon AppIcon => _iconIdle;
@@ -36,8 +39,9 @@ public sealed class TrayAppContext : ApplicationContext
     /// </summary>
     public bool IsHeadless { get; }
 
-    public TrayAppContext(bool openSettings, EventWaitHandle showSettingsSignal)
+    public TrayAppContext(bool openSettings, EventWaitHandle showSettingsSignal, bool diagnosticsOnly = false)
     {
+        _diagnosticsOnly = diagnosticsOnly;
         _cfg = AppConfig.Load();
         IsHeadless = string.Equals(Environment.UserName, _cfg.TargetUsername, StringComparison.OrdinalIgnoreCase);
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
@@ -63,7 +67,7 @@ public sealed class TrayAppContext : ApplicationContext
         // Game pass-through (default off): the shim runs ONLY in the guest
         // session; the relay listener + name resolver run ONLY in the owner
         // session and feed captured game names into the presence above.
-        if (_cfg.Discord.GamePassthroughEnabled)
+        if (!_diagnosticsOnly && _cfg.Discord.GamePassthroughEnabled)
         {
             if (IsHeadless)
             {
@@ -77,6 +81,10 @@ public sealed class TrayAppContext : ApplicationContext
             }
         }
         _sessions = new SessionWatcher(_cfg);
+        _sessionLogger = new SessionLogger(_cfg,
+            new CompanionSnapshotSource(new MachineSnapshotSource(_cfg.TargetUsername, _cfg.IncludeDisconnectedSessions),
+                _lighting, _discord, _cfg), IsHeadless || _diagnosticsOnly);
+        Log.MessageLogged += _sessionLogger.LogAppEvent;
         _sessions.SessionsChanged += () => _ = EvaluateAsync("session change");
 
         if (_cfg.RegistryWatch.Enabled)
@@ -85,7 +93,7 @@ public sealed class TrayAppContext : ApplicationContext
             _registry.Changed += () => _ = EvaluateAsync("registry change");
         }
 
-        if (!IsHeadless)
+        if (!IsHeadless && !_diagnosticsOnly)
         {
             var menu = new ContextMenuStrip();
             var open = menu.Items.Add("Open Playcast Companion", null, (_, _) => OpenSettings());
@@ -108,7 +116,7 @@ public sealed class TrayAppContext : ApplicationContext
         // Safety net: periodic re-check in case a WTS notification was missed.
         _pollTimer = new System.Windows.Forms.Timer { Interval = 30_000 };
         _pollTimer.Tick += (_, _) => _ = EvaluateAsync("poll");
-        _pollTimer.Start();
+        if (!_diagnosticsOnly) _pollTimer.Start();
 
         // Release promptly when this session itself logs off or the machine
         // shuts down; if the process is killed harder than this, the Chroma
@@ -187,10 +195,14 @@ public sealed class TrayAppContext : ApplicationContext
 
     private async Task EvaluateAsync(string reason)
     {
+        if (_diagnosticsOnly) return;
         await _evalGate.WaitAsync();
         try
         {
-            bool guestActive = _sessions.IsTargetUserLoggedOn() || (_registry?.IsActive() ?? false);
+            var guestSessionIds = _sessions.GetTargetSessionIds();
+            bool guestActive = guestSessionIds.Count > 0 || (_registry?.IsActive() ?? false);
+            _sessionLogger.UpdateSession(guestActive, reason,
+                guestSessionIds.Count > 0 ? string.Join(",", guestSessionIds.Order()) : "registry-signal");
             if (guestActive)
             {
                 if (!GuestActive)
@@ -242,11 +254,13 @@ public sealed class TrayAppContext : ApplicationContext
 
     private void OnSessionEnded(object? sender, SessionEndedEventArgs e)
     {
+        StopSessionLogging();
         try { Task.Run(StopAllLightingAsync).Wait(3000); } catch { }
     }
 
     private void OnApplicationExit(object? sender, EventArgs e)
     {
+        StopSessionLogging();
         try { if (_tray != null) _tray.Visible = false; } catch { }
         try { Task.Run(StopAllLightingAsync).Wait(3000); } catch { }
         try { Task.Run(() => _discord?.ClearAsync() ?? Task.CompletedTask).Wait(2000); } catch { }
@@ -259,6 +273,7 @@ public sealed class TrayAppContext : ApplicationContext
 
     private void ExitApp()
     {
+        StopSessionLogging();
         SystemEvents.SessionEnded -= OnSessionEnded;
         _pollTimer.Stop();
         _sessions.Dispose();
@@ -273,5 +288,11 @@ public sealed class TrayAppContext : ApplicationContext
         _tray?.Dispose();
         Log.Info("--- exited ---");
         ExitThread();
+    }
+
+    private void StopSessionLogging()
+    {
+        Log.MessageLogged -= _sessionLogger.LogAppEvent;
+        try { Task.Run(_sessionLogger.StopAsync).Wait(3000); } catch { }
     }
 }

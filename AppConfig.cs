@@ -32,6 +32,8 @@ public sealed class AppConfig
 
     public DiscordConfig Discord { get; set; } = new();
 
+    public SessionLoggingConfig SessionLogging { get; set; } = new();
+
     public static AppConfig Load()
     {
         try
@@ -63,6 +65,8 @@ public sealed class AppConfig
     /// config can never drive the app into nonsense (or point its REST calls off-box).</summary>
     public void Normalize()
     {
+        SessionLogging ??= new();
+        SessionLogging.Normalize();
         TargetUsername = Sanitize(TargetUsername, 104, "NonsoleMode");
         TickSeconds = Math.Clamp(TickSeconds, 1, 10);
         RetryInitSeconds = Math.Clamp(RetryInitSeconds, 5, 600);

@@ -24,11 +24,11 @@ public static class Branding
     public static readonly Color Slate = Color.FromArgb(120, 130, 145);
 
     // App-wide dark theme.
-    public static readonly Color UiBack = Color.FromArgb(16, 16, 16);
-    public static readonly Color UiSurface = Color.FromArgb(30, 30, 30);
-    public static readonly Color UiBorder = Color.FromArgb(45, 45, 45);
-    public static readonly Color UiText = Color.FromArgb(225, 225, 225);
-    public static readonly Color UiTextDim = Color.FromArgb(150, 150, 150);
+    public static readonly Color UiBack = Color.FromArgb(21, 25, 31);
+    public static readonly Color UiSurface = Color.FromArgb(27, 32, 40);
+    public static readonly Color UiBorder = Color.FromArgb(48, 56, 69);
+    public static readonly Color UiText = Color.FromArgb(237, 241, 247);
+    public static readonly Color UiTextDim = Color.FromArgb(166, 178, 196);
     public static readonly Color PlaycastGold = Color.FromArgb(246, 197, 72); // accent
 
     // Per-vendor card palettes (colors are not protectable; names are used
