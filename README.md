@@ -11,7 +11,7 @@ guest session ends, everything hands back — Synapse/iCUE/GG profiles return an
 the Discord status clears.
 
 **Downloads:** [regular 2.5.0](https://github.com/TypicalTitan/PlaycastCompanion/releases/tag/v2.5.0)
-and [Native 3.2.0](https://github.com/TypicalTitan/PlaycastCompanion-cpp/releases/tag/v3.2.0).
+and [Native 3.2.1](https://github.com/TypicalTitan/PlaycastCompanion-cpp/releases/tag/v3.2.1).
 Both include the sidebar, session logger and local log analyzer. Choose one:
 they use the same installation folder and compatible configuration.
 
