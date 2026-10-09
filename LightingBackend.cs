@@ -77,7 +77,7 @@ public abstract class LightingBackendBase : ILightingBackend
         {
             Log.Info($"{DisplayName}: release failed ({ex.Message})");
         }
-        StatusText = "Ready";
+        StatusText = ReleasedStatus;
     }
 
     private async Task RunAsync(CancellationToken ct)
@@ -129,6 +129,7 @@ public abstract class LightingBackendBase : ILightingBackend
 
     /// <summary>Hand lighting control back to the vendor software.</summary>
     protected abstract Task ReleaseAsync();
+    protected virtual string ReleasedStatus => "Ready";
 
     /// <summary>Called when a tick failed, before the retry delay.</summary>
     protected virtual void OnConnectionLost() { }

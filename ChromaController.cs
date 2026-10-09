@@ -8,7 +8,7 @@ namespace PlaycastCompanion;
 /// forces every device type to static black; heartbeats keep the session
 /// alive (the SDK drops it after ~15 s of silence) and the periodic re-apply
 /// beats Synapse or other SDK apps reasserting their effects. Releasing
-/// DELETEs the session so Synapse's normal profile returns.
+/// DELETEs the session so Synapse can resume control; restoration is not observed.
 /// </summary>
 public sealed class ChromaController : LightingBackendBase
 {
@@ -18,11 +18,16 @@ public sealed class ChromaController : LightingBackendBase
     private const string BlackEffectJson = """{"effect":"CHROMA_STATIC","param":{"color":0}}""";
 
     // Init can legitimately take several seconds while the SDK enumerates devices.
-    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
+    private readonly HttpClient _http;
     private readonly AppConfig _cfg;
     private string? _sessionUri;
+    private string _releaseStatus = "Ready";
 
-    public ChromaController(AppConfig cfg) => _cfg = cfg;
+    public ChromaController(AppConfig cfg, HttpClient? http = null)
+    {
+        _cfg = cfg;
+        _http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+    }
 
     public override string DisplayName => "Razer Chroma";
     public override bool Enabled => _cfg.RazerEnabled;
@@ -30,6 +35,7 @@ public sealed class ChromaController : LightingBackendBase
     protected override TimeSpan RetryDelay => TimeSpan.FromSeconds(Math.Max(5, _cfg.RetryInitSeconds));
     protected override string UnavailableText(Exception ex) => "Unreachable — retrying (is Razer Synapse running?)";
     protected override void OnConnectionLost() => _sessionUri = null;
+    protected override string ReleasedStatus => _releaseStatus;
 
     protected override async Task ApplyTickAsync(CancellationToken ct)
     {
@@ -76,6 +82,7 @@ public sealed class ChromaController : LightingBackendBase
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
         _sessionUri = doc.RootElement.GetProperty("uri").GetString()
             ?? throw new InvalidOperationException("Chroma init response had no uri");
+        _releaseStatus = "Ready";
         Log.Info($"Chroma session opened: {_sessionUri}");
     }
 
@@ -94,12 +101,23 @@ public sealed class ChromaController : LightingBackendBase
             return;
         try
         {
-            using var resp = await _http.DeleteAsync(uri).ConfigureAwait(false);
-            Log.Info($"Chroma session released (HTTP {(int)resp.StatusCode}); Synapse lighting restored");
+            using var releaseBudget = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var resp = await _http.DeleteAsync(uri, releaseBudget.Token).ConfigureAwait(false);
+            if (resp.IsSuccessStatusCode)
+            {
+                _releaseStatus = "Hold ended; Chroma session released";
+                Log.Info($"Chroma session released (HTTP {(int)resp.StatusCode}); Synapse control can resume; lighting restoration not observed");
+            }
+            else
+            {
+                _releaseStatus = "Hold ended; Chroma release unverified";
+                Log.Info($"Chroma hold ended; DELETE returned HTTP {(int)resp.StatusCode}; SDK expiry expected after ~15 s without commands; lighting restoration unverified");
+            }
         }
         catch (Exception ex)
         {
-            Log.Info($"Chroma release failed ({ex.Message}); the session will time out on its own in ~15 s");
+            _releaseStatus = "Hold ended; Chroma release unverified";
+            Log.Info($"Chroma hold ended; endpoint unavailable ({ex.Message}); SDK expiry expected after ~15 s without commands; lighting restoration unverified");
         }
     }
 }

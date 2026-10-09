@@ -23,6 +23,7 @@ public sealed class TrayAppContext : ApplicationContext
     private readonly Icon _iconStealth;
     private MainForm? _form;
     private readonly bool _diagnosticsOnly;
+    private volatile bool _stopping;
 
     public AppConfig Config => _cfg;
     public IReadOnlyList<ILightingBackend> Lighting => _lighting;
@@ -166,9 +167,14 @@ public sealed class TrayAppContext : ApplicationContext
     /// (if configured) the Discord presence live.</summary>
     public async Task TestGuestModeAsync()
     {
+        if (_stopping) return;
         Log.Info("guest-mode preview started");
         foreach (var backend in _lighting)
+        {
+            if (_stopping) return;
             backend.StartBlackout(); // no-ops when the backend is disabled
+        }
+        if (_stopping) return;
         _discord?.SetActive();
         await Task.Delay(10_000);
         await EvaluateAsync("preview end");
@@ -195,20 +201,20 @@ public sealed class TrayAppContext : ApplicationContext
 
     private async Task EvaluateAsync(string reason)
     {
-        if (_diagnosticsOnly) return;
+        if (_diagnosticsOnly || _stopping) return;
         await _evalGate.WaitAsync();
         try
         {
+            if (_stopping) return;
             var guestSessionIds = _sessions.GetTargetSessionIds();
             bool guestActive = guestSessionIds.Count > 0 || (_registry?.IsActive() ?? false);
-            _sessionLogger.UpdateSession(guestActive, reason,
-                guestSessionIds.Count > 0 ? string.Join(",", guestSessionIds.Order()) : "registry-signal");
             if (guestActive)
             {
                 if (!GuestActive)
                     Log.Info($"guest session active ({reason}) -> stealth on");
                 foreach (var backend in _lighting)
                 {
+                    if (_stopping) return;
                     if (backend.Enabled && !backend.IsHolding)
                         backend.StartBlackout();
                     else if (!backend.Enabled && backend.IsHolding)
@@ -224,6 +230,7 @@ public sealed class TrayAppContext : ApplicationContext
                     await Task.WhenAll(holding.Select(b => b.StopBlackoutAsync()));
                 }
             }
+            if (_stopping) return;
             if (_discord != null)
             {
                 if (guestActive)
@@ -231,6 +238,9 @@ public sealed class TrayAppContext : ApplicationContext
                 else
                     await _discord.ClearAsync();
             }
+            if (_stopping) return;
+            _sessionLogger.UpdateSession(guestActive, reason,
+                guestSessionIds.Count > 0 ? string.Join(",", guestSessionIds.Order()) : "registry-signal");
             GuestActive = guestActive;
             _ui.Post(_ =>
             {
@@ -254,16 +264,19 @@ public sealed class TrayAppContext : ApplicationContext
 
     private void OnSessionEnded(object? sender, SessionEndedEventArgs e)
     {
-        StopSessionLogging();
+        _stopping = true;
         try { Task.Run(StopAllLightingAsync).Wait(3000); } catch { }
+        try { Task.Run(() => _discord?.ClearAsync() ?? Task.CompletedTask).Wait(2000); } catch { }
+        StopSessionLogging();
     }
 
     private void OnApplicationExit(object? sender, EventArgs e)
     {
-        StopSessionLogging();
+        _stopping = true;
         try { if (_tray != null) _tray.Visible = false; } catch { }
         try { Task.Run(StopAllLightingAsync).Wait(3000); } catch { }
         try { Task.Run(() => _discord?.ClearAsync() ?? Task.CompletedTask).Wait(2000); } catch { }
+        StopSessionLogging();
         try { Task.Run(() => _shim?.StopAsync() ?? Task.CompletedTask).Wait(2000); } catch { }
         try { Task.Run(() => _channel?.StopAsync() ?? Task.CompletedTask).Wait(2000); } catch { }
     }
@@ -273,7 +286,7 @@ public sealed class TrayAppContext : ApplicationContext
 
     private void ExitApp()
     {
-        StopSessionLogging();
+        _stopping = true;
         SystemEvents.SessionEnded -= OnSessionEnded;
         _pollTimer.Stop();
         _sessions.Dispose();
@@ -283,6 +296,7 @@ public sealed class TrayAppContext : ApplicationContext
             _tray.Visible = false;
         try { Task.Run(StopAllLightingAsync).Wait(5000); } catch { }
         try { Task.Run(() => _discord?.ClearAsync() ?? Task.CompletedTask).Wait(3000); } catch { }
+        StopSessionLogging();
         try { Task.Run(() => _shim?.StopAsync() ?? Task.CompletedTask).Wait(2000); } catch { }
         try { Task.Run(() => _channel?.StopAsync() ?? Task.CompletedTask).Wait(2000); } catch { }
         _tray?.Dispose();

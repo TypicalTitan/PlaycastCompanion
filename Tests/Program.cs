@@ -10,6 +10,8 @@ internal static class Program
             DiagnosticClientIdentityContractTests.Run();
             await DiagnosticFeedContractTests.RunAsync();
             await SessionLifecycleContractTests.RunAsync();
+            await TerminalSnapshotContractTests.RunAsync();
+            await LightingContractTests.RunAsync();
             GameInventoryContractTests.Run();
             await LogAnalysisContractTests.RunAsync();
             SettingsFooterContractTests.Run();

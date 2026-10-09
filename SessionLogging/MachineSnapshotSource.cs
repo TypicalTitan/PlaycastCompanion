@@ -15,7 +15,7 @@ public sealed class MachineSnapshotSource : ISessionSnapshotSource
     private readonly TimeProvider _clock;
 
     public MachineSnapshotSource(string targetUsername, bool includeDisconnected = false)
-        : this(targetUsername, includeDisconnected, new GameInventorySource(),
+        : this(targetUsername, includeDisconnected, new GameInventorySource(targetUsername),
             new WindowsSessionInventorySource(), new WindowsProcessSnapshotSource(),
             new WindowsNonsoleRegistrySource(), TimeProvider.System) { }
 
@@ -63,6 +63,20 @@ public sealed class MachineSnapshotSource : ISessionSnapshotSource
             disks = CaptureDisks()
         });
     }
+
+    internal static object CaptureTerminalFallback(string error) => new
+    {
+        capturedAtUtc = DateTimeOffset.UtcNow,
+        snapshotFailed = error,
+        machine = CaptureMachine(),
+        companion = CaptureCompanion(),
+        installedGames = (object?)null,
+        runningGames = (object?)null,
+        installedGameSources = (object?)null,
+        runningGameDetectionStatus = "unavailable",
+        inventoryLimitations = new[] { "Terminal inventory capture failed; game state is unknown." },
+        processCoverage = new { Status = "unavailable", Errors = new[] { new SnapshotError("terminal_snapshot", "unavailable", error) } }
+    };
 
     private static object CaptureMachine() => new
     {

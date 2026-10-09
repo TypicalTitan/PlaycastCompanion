@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -8,7 +9,9 @@ public sealed class SessionLogger : IDisposable
 {
     private readonly object _gate = new();
     private readonly AppConfig _config;
-    private readonly ISessionSnapshotSource _snapshots;
+    private readonly SessionSnapshotCapture _capture;
+    private readonly TimeSpan _finalSnapshotBudget;
+    private readonly ConcurrentQueue<SessionClosure> _closures = new();
     private readonly string? _baseDirectory;
     private readonly DiagnosticEventClassifier _classifier = new();
     private readonly CancellationTokenSource _cancellation = new();
@@ -24,12 +27,17 @@ public sealed class SessionLogger : IDisposable
     private bool _stopped;
     private string? _sessionIdentity;
     private DateTime _lastSnapshotRequestUtc;
+    private CancellationTokenSource? _periodicCapture;
+    private Task? _stopTask;
+    private sealed record SessionClosure(SessionLogWriter Writer, string Reason, bool IncludeSecrets, DateTimeOffset ObservedEndAtUtc);
 
     public SessionLogger(AppConfig config, ISessionSnapshotSource snapshotSource, bool isHeadless,
-        string? baseDirectory = null)
+        string? baseDirectory = null, TimeSpan? finalSnapshotBudget = null)
     {
         _config = config;
-        _snapshots = snapshotSource;
+        _capture = new SessionSnapshotCapture(snapshotSource);
+        _finalSnapshotBudget = finalSnapshotBudget ?? TimeSpan.FromSeconds(2);
+        if (_finalSnapshotBudget <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(finalSnapshotBudget));
         _baseDirectory = baseDirectory;
         _directory = baseDirectory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "PlaycastCompanion", "sessions");
@@ -188,23 +196,47 @@ public sealed class SessionLogger : IDisposable
 
     private async Task SnapshotLoopAsync(CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested)
+        while (true)
         {
+            while (_closures.TryDequeue(out var closure))
+                await CompleteSessionAsync(closure).ConfigureAwait(false);
+            if (cancellationToken.IsCancellationRequested) return;
+            SessionLogWriter? selectedWriter = null;
             try
             {
                 await _snapshotRequested.WaitAsync(TimeSpan.FromSeconds(
                     _config.SessionLogging.SnapshotIntervalSeconds), cancellationToken).ConfigureAwait(false);
                 SessionLogWriter? writer;
-                lock (_gate) writer = _active && _config.SessionLogging.Enabled ? _writer : null;
+                CancellationTokenSource? periodic;
+                lock (_gate)
+                {
+                    writer = _active && _config.SessionLogging.Enabled ? _writer : null;
+                    selectedWriter = writer;
+                    periodic = writer == null ? null : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    _periodicCapture = periodic;
+                }
                 if (writer == null) continue;
-                var snapshot = await _snapshots.CaptureAsync(cancellationToken).ConfigureAwait(false);
-                WriteSnapshot(writer, snapshot);
+                try
+                {
+                    var snapshot = await _capture.CaptureAsync(periodic!.Token).ConfigureAwait(false);
+                    WriteSnapshot(writer, snapshot);
+                }
+                catch (OperationCanceledException) when (periodic!.IsCancellationRequested) { }
+                finally
+                {
+                    lock (_gate) if (ReferenceEquals(_periodicCapture, periodic)) _periodicCapture = null;
+                    periodic!.Dispose();
+                }
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
             catch (Exception ex)
             {
-                Record("diagnostics", new { @event = "snapshotFailed", error = ex.Message });
-                lock (_gate) _lastError = "Machine snapshot failed: " + ex.Message;
+                lock (_gate)
+                {
+                    if (!ReferenceEquals(selectedWriter, _writer) || _writer == null) continue;
+                    _writer.Write("diagnostics", new { @event = "snapshotFailed", error = ex.Message }, IncludeSecrets);
+                    _lastError = "Machine snapshot failed: " + ex.Message;
+                }
             }
         }
     }
@@ -214,12 +246,19 @@ public sealed class SessionLogger : IDisposable
         lock (_gate)
         {
             if (_stopped || !_active || !_config.SessionLogging.Enabled || !ReferenceEquals(writer, _writer)) return;
-            writer.Write("diagnostics", new { @event = "machineSnapshot", snapshot }, IncludeSecrets);
-            var json = snapshot is JsonObject obj ? obj : JsonSerializer.SerializeToNode(snapshot) as JsonObject;
-            if (json == null) return;
-            writer.Write("games", new JsonObject
+            WriteSnapshotRecords(writer, snapshot, IncludeSecrets, "periodic");
+        }
+    }
+
+    private static void WriteSnapshotRecords(SessionLogWriter writer, object snapshot, bool includeSecrets, string phase)
+    {
+        writer.Write("diagnostics", new { @event = "machineSnapshot", phase, snapshot }, includeSecrets);
+        var json = snapshot is JsonObject obj ? obj : JsonSerializer.SerializeToNode(snapshot) as JsonObject;
+        if (json == null) return;
+        writer.Write("games", new JsonObject
             {
                 ["event"] = "gameSnapshot",
+                ["phase"] = phase,
                 ["installedGames"] = json["installedGames"]?.DeepClone(),
                 ["runningGames"] = json["runningGames"]?.DeepClone(),
                 ["installedGameSources"] = json["installedGameSources"]?.DeepClone(),
@@ -227,27 +266,60 @@ public sealed class SessionLogger : IDisposable
                 ["runningGameDetectionStatus"] = json["runningGameDetectionStatus"]?.DeepClone(),
                 ["processCoverage"] = json["processCoverage"]?.DeepClone(),
                 ["targetSessionIds"] = json["targetSessionIds"]?.DeepClone(),
-            }, IncludeSecrets);
-        }
+            }, includeSecrets);
     }
 
     private void CloseSession(string reason)
     {
-        _writer?.Write("session", new { @event = "sessionEnded", reason, bytesWritten = _writer.BytesWritten }, IncludeSecrets);
-        _lastError = _writer?.LastError;
-        _writer?.Dispose();
+        if (_writer == null) return;
+        _closures.Enqueue(new(_writer, reason, IncludeSecrets, DateTimeOffset.UtcNow));
+        _lastError = _writer.LastError;
         _writer = null;
+        if (_periodicCapture != null) _ = _periodicCapture.CancelAsync();
+        RequestSnapshot(force: true);
     }
 
-    public async Task StopAsync()
+    private async Task CompleteSessionAsync(SessionClosure closure)
+    {
+        using var budget = new CancellationTokenSource(_finalSnapshotBudget);
+        try
+        {
+            object snapshot;
+            try { snapshot = await _capture.CaptureAsync(budget.Token).ConfigureAwait(false); }
+            catch (Exception error)
+            {
+                var message = error is OperationCanceledException ? "Terminal snapshot capture exceeded its cancellation budget." : error.Message;
+                closure.Writer.Write("diagnostics", new { @event = "snapshotFailed", phase = "sessionEnd", error = message }, closure.IncludeSecrets);
+                snapshot = _capture.Fallback(message);
+            }
+            WriteSnapshotRecords(closure.Writer, snapshot, closure.IncludeSecrets, "sessionEnd");
+        }
+        catch (Exception error)
+        {
+            closure.Writer.Write("diagnostics", new { @event = "snapshotFailed", phase = "sessionEnd", error = error.Message }, closure.IncludeSecrets);
+        }
+        finally
+        {
+            closure.Writer.Write("session", new { @event = "sessionEnded", reason = closure.Reason,
+                observedEndAtUtc = closure.ObservedEndAtUtc, bytesWritten = closure.Writer.BytesWritten }, closure.IncludeSecrets);
+            closure.Writer.Dispose();
+        }
+    }
+
+    public Task StopAsync()
     {
         lock (_gate)
         {
-            if (_stopped) return;
+            if (_stopTask != null) return _stopTask;
             _stopped = true;
             _active = false;
             CloseSession("Companion shutdown");
+            return _stopTask = StopCoreAsync();
         }
+    }
+
+    private async Task StopCoreAsync()
+    {
         await _cancellation.CancelAsync().ConfigureAwait(false);
         if (_listener != null) await _listener.StopAsync().ConfigureAwait(false);
         await _snapshotLoop.ConfigureAwait(false);

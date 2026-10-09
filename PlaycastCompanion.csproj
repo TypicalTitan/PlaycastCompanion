@@ -11,7 +11,7 @@
     <AssemblyName>PlaycastCompanion</AssemblyName>
     <RootNamespace>PlaycastCompanion</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <Version>2.5.0</Version>
+    <Version>2.5.1</Version>
     <Product>Playcast Companion</Product>
     <Company>TypicalTitan</Company>
     <Authors>Stepan Varganov (TypicalTitan)</Authors>

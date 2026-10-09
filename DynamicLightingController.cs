@@ -28,6 +28,7 @@ public sealed class DynamicLightingController : LightingBackendBase
     private readonly AppConfig _cfg;
     private string _holdingStatus = "Holding blackout";
     private string _lastSummary = "";
+    private readonly WinRtOperationGate _operations = new();
 
     public DynamicLightingController(AppConfig cfg) => _cfg = cfg;
 
@@ -56,7 +57,10 @@ public sealed class DynamicLightingController : LightingBackendBase
     protected override async Task ApplyTickAsync(CancellationToken ct)
     {
         var excluded = ExcludedVids();
-        var devices = await DeviceInformation.FindAllAsync(LampArray.GetDeviceSelector());
+        var devices = await _operations.InvokeAsync(
+            () => DeviceInformation.FindAllAsync(LampArray.GetDeviceSelector()),
+            TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
         if (devices.Count == 0)
             throw new InvalidOperationException("no LampArray devices connected");
 
@@ -66,7 +70,9 @@ public sealed class DynamicLightingController : LightingBackendBase
             ct.ThrowIfCancellationRequested();
             try
             {
-                var lamp = await LampArray.FromIdAsync(info.Id);
+                var lamp = await _operations.InvokeAsync(() => LampArray.FromIdAsync(info.Id),
+                    TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested();
                 if (lamp == null || !lamp.IsConnected)
                     continue;
                 if (excluded.Contains(lamp.HardwareVendorId))
@@ -74,9 +80,11 @@ public sealed class DynamicLightingController : LightingBackendBase
                     skipped++;
                     continue; // its own engine handles this device
                 }
+                ct.ThrowIfCancellationRequested();
                 lamp.SetColor(Windows.UI.Color.FromArgb(255, 0, 0, 0));
                 painted++;
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch
             {
                 // a single flaky device shouldn't stop the rest

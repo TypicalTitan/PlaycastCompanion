@@ -1,7 +1,9 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 
 namespace PlaycastCompanion;
 
@@ -100,20 +102,46 @@ public sealed class WindowsProcessSnapshotSource : IProcessSnapshotSource
             || name.Value.StartsWith("PlayJector", StringComparison.OrdinalIgnoreCase);
         bool isTarget = session.Value is int id && targetSessions.Contains(id);
         if (!isPlaycast && !isTarget) return;
-        var executable = Read(() => process.MainModule?.FileName);
+        var executable = Read(() => QueryExecutable(process.Id));
         if (executable.Status != "available")
             errors.Add(new($"process_path:{process.Id}", executable.Status, executable.Error ?? "No executable path."));
         var game = isTarget && executable.Value is string path && Path.GetExtension(path).Equals(".exe", StringComparison.OrdinalIgnoreCase)
             ? games.FirstOrDefault(game => GameInventorySource.ContainsExecutable(game.InstallRoot, path)) : null;
         if (!isPlaycast && game is null) return;
-        var observation = new ProcessObservation(process.Id, name.Value, session, executable,
-            Read<double?>(() => process.TotalProcessorTime.TotalSeconds),
-            Read<long?>(() => process.WorkingSet64),
-            Read<DateTimeOffset?>(() => new DateTimeOffset(process.StartTime.ToUniversalTime())),
+        var cpu = Read<double?>(() => process.TotalProcessorTime.TotalSeconds);
+        var memory = Read<long?>(() => process.WorkingSet64);
+        var started = Read<DateTimeOffset?>(() => new DateTimeOffset(process.StartTime.ToUniversalTime()));
+        AddMetricFailure(errors, process.Id, "cpu", cpu);
+        AddMetricFailure(errors, process.Id, "working_set", memory);
+        AddMetricFailure(errors, process.Id, "started_at", started);
+        var observation = new ProcessObservation(process.Id, name.Value, session, executable, cpu, memory, started,
             game?.Id, game?.Name, game?.Store);
         if (isPlaycast) playcast.Add(observation);
         if (game is not null) running.Add(observation);
     }
+
+    private static void AddMetricFailure<T>(List<SnapshotError> errors, int pid, string name, ObservedMetric<T> metric)
+    {
+        if (metric.Status != "available")
+            errors.Add(new($"process_{name}:{pid}", metric.Status, metric.Error ?? "Process metric unavailable."));
+    }
+
+    private static string QueryExecutable(int pid)
+    {
+        using var handle = OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+        if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+        var name = new StringBuilder(32768);
+        int length = name.Capacity;
+        if (!QueryFullProcessImageNameW(handle, 0, name, ref length))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        return name.ToString();
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, int pid);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryFullProcessImageNameW(SafeProcessHandle process, uint flags, StringBuilder name, ref int length);
 
     private static ObservedMetric<T> Read<T>(Func<T?> read)
     {

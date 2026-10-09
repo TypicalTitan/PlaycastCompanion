@@ -1,19 +1,22 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Microsoft.Win32;
 
 namespace PlaycastCompanion;
 
 /// <summary>Reads launcher manifests without launching games or invoking any scripts.</summary>
-public sealed class GameInventorySource : IGameInventorySource
+public sealed partial class GameInventorySource : IGameInventorySource
 {
     private readonly IInventoryFileSystem _files;
     private readonly IReadOnlyList<string>? _steamRoots;
     private readonly string _epicManifestDirectory;
+    private readonly Func<GameLocations>? _discover;
+    private readonly GameLocations? _locations;
 
-    public GameInventorySource() : this(new InventoryFileSystem(), null,
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "Epic", "EpicGamesLauncher", "Data", "Manifests")) { }
+    public GameInventorySource() : this("NonsoleMode") { }
+    public GameInventorySource(string targetUsername) : this(new InventoryFileSystem(), [], "")
+    { _discover = () => TargetGameLocations.Discover(targetUsername); }
+    public GameInventorySource(IInventoryFileSystem files, GameLocations locations)
+        : this(files, locations.SteamRoots, locations.EpicManifests) { _locations = locations; }
 
     public GameInventorySource(IInventoryFileSystem files, IEnumerable<string>? steamRoots,
         string epicManifestDirectory)
@@ -28,10 +31,10 @@ public sealed class GameInventorySource : IGameInventorySource
         cancellationToken.ThrowIfCancellationRequested();
         var games = new List<InstalledGame>();
         var sources = new List<SourceCoverage>();
-        var discoveryErrors = new List<SnapshotError>();
-        var steamRoots = _steamRoots ?? DiscoverSteamRoots(discoveryErrors);
-        sources.Add(new("steam_discovery", discoveryErrors.Count == 0 ? "available" : "partial",
-            steamRoots.Count, discoveryErrors));
+        var locations = _discover?.Invoke() ?? _locations;
+        cancellationToken.ThrowIfCancellationRequested();
+        if (locations is not null) sources.AddRange(locations.Sources);
+        var steamRoots = locations?.SteamRoots ?? _steamRoots ?? [];
         var libraries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var root in steamRoots)
         {
@@ -40,37 +43,23 @@ public sealed class GameInventorySource : IGameInventorySource
         }
         foreach (var library in libraries)
             ReadSteamLibrary(library, games, sources, cancellationToken);
-        ReadEpic(games, sources, cancellationToken);
-        return new(games.DistinctBy(game => (game.Store, game.Id, game.InstallRoot)).ToArray(),
+        ReadEpic(games, sources, cancellationToken, locations);
+        var legendaryCandidates = locations is null ? [] : new[] { locations.LegendaryInstalled }
+            .Concat(locations.LegendaryCandidates).Where(path => path.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase).Take(3);
+        foreach (var manifest in legendaryCandidates)
+            ReadLegendary(manifest, games, sources, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        return new(games.DistinctBy(game => game.Store + "\0" + game.Id + "\0" + InventoryPath.Resolve(game.InstallRoot),
+                StringComparer.OrdinalIgnoreCase).ToArray(),
             sources, new[]
             {
                 "Steam and Epic manifests only; GOG, Xbox, Ubisoft, EA, standalone and unregistered games are not inventoried.",
-                "Steam discovery uses this Companion account's registry and common installation paths; another account's custom libraries may be unavailable.",
+                "Launcher discovery uses the target account's current SID/profile and registry, including Playcast Steam and Legendary metadata; protected guest files may be inaccessible from the owner session.",
+                "Shared Epic manifests without target-account registration are included only when their install location belongs to the target profile or Playcast game storage.",
                 "Manifests indicate launcher installations, not Playcast entitlement or game launchability.",
                 "Running-game matching uses executables under known install roots in target WTS sessions; protected paths and games without manifests remain unknown."
             });
-    }
-
-    private static IReadOnlyList<string> DiscoverSteamRoots(List<SnapshotError> errors)
-    {
-        var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        roots.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Steam"));
-        foreach (var (hive, view, subkey, value) in new[]
-        {
-            (RegistryHive.CurrentUser, RegistryView.Default, @"Software\Valve\Steam", "SteamPath"),
-            (RegistryHive.LocalMachine, RegistryView.Registry32, @"Software\Valve\Steam", "InstallPath")
-        })
-        {
-            try
-            {
-                using var baseKey = RegistryKey.OpenBaseKey(hive, view);
-                using var key = baseKey.OpenSubKey(subkey, false);
-                if (key?.GetValue(value) is string path && Path.IsPathFullyQualified(path))
-                    roots.Add(Path.GetFullPath(path));
-            }
-            catch (Exception error) { errors.Add(SnapshotFailures.From($"{hive}\\{subkey}", error)); }
-        }
-        return roots.ToArray();
     }
 
     private void DiscoverLibraries(string root, HashSet<string> libraries, List<SourceCoverage> sources)
@@ -98,7 +87,7 @@ public sealed class GameInventorySource : IGameInventorySource
             }
             sources.Add(new(manifest, errors.Count == 0 ? "available" : "partial", folders.Children.Count, errors));
         }
-        catch (Exception error)
+        catch (Exception error) when (error is not OperationCanceledException)
         {
             errors.Add(SnapshotFailures.From(manifest, error));
             sources.Add(new(manifest, SnapshotFailures.Status(error), 0, errors));
@@ -161,39 +150,41 @@ public sealed class GameInventorySource : IGameInventorySource
     }
 
     private void ReadEpic(List<InstalledGame> games, List<SourceCoverage> sources,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, GameLocations? locations)
     {
+        var epicDirectory = locations?.EpicManifests ?? _epicManifestDirectory;
+        if (epicDirectory.Length == 0) return;
         var errors = new List<SnapshotError>();
         int scanned = 0;
         try
         {
-            if (!_files.DirectoryExists(_epicManifestDirectory))
+            if (!_files.DirectoryExists(epicDirectory))
             {
-                sources.Add(new(_epicManifestDirectory, "not_found", 0, errors));
+                sources.Add(new(epicDirectory, "not_found", 0, errors));
                 return;
             }
-            foreach (var manifest in _files.EnumerateFiles(_epicManifestDirectory, "*.item"))
+            foreach (var manifest in _files.EnumerateFiles(epicDirectory, "*.item"))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 scanned++;
                 try
                 {
-                    var game = ReadEpicManifest(manifest, errors);
+                    var game = ReadEpicManifest(manifest, errors, locations);
                     if (game is not null) games.Add(game);
                 }
                 catch (Exception error) when (error is not OperationCanceledException)
                 { errors.Add(SnapshotFailures.From(manifest, error)); }
             }
-            sources.Add(new(_epicManifestDirectory, errors.Count == 0 ? "available" : "partial", scanned, errors));
+            sources.Add(new(epicDirectory, errors.Count == 0 ? "available" : "partial", scanned, errors));
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
-            errors.Add(SnapshotFailures.From(_epicManifestDirectory, error));
-            sources.Add(new(_epicManifestDirectory, SnapshotFailures.Status(error), scanned, errors));
+            errors.Add(SnapshotFailures.From(epicDirectory, error));
+            sources.Add(new(epicDirectory, SnapshotFailures.Status(error), scanned, errors));
         }
     }
 
-    private InstalledGame? ReadEpicManifest(string manifest, List<SnapshotError> errors)
+    private InstalledGame? ReadEpicManifest(string manifest, List<SnapshotError> errors, GameLocations? locations)
     {
         using var document = JsonDocument.Parse(_files.ReadAllText(manifest));
         var item = document.RootElement;
@@ -203,6 +194,8 @@ public sealed class GameInventorySource : IGameInventorySource
         if (root is null || !Path.IsPathFullyQualified(root))
             throw new FormatException("Epic InstallLocation must be absolute.");
         root = Path.GetFullPath(root);
+        if (locations?.FilterSharedEpic == true && !locations.EpicInstallRoots.Any(allowed => ContainsExecutable(allowed, root)))
+            return null;
         if (!_files.DirectoryExists(root))
         {
             errors.Add(new(manifest, "missing_install_directory", root));
@@ -221,9 +214,9 @@ public sealed class GameInventorySource : IGameInventorySource
     {
         try
         {
-            var root = Path.GetFullPath(installRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            var root = InventoryPath.Resolve(installRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                 + Path.DirectorySeparatorChar;
-            return Path.GetFullPath(executablePath).StartsWith(root, StringComparison.OrdinalIgnoreCase);
+            return InventoryPath.Resolve(executablePath).StartsWith(root, StringComparison.OrdinalIgnoreCase);
         }
         catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException)
         { return false; }
@@ -236,7 +229,22 @@ public sealed class InventoryFileSystem : IInventoryFileSystem
         && (attributes & FileAttributes.Directory) != 0;
     public bool FileExists(string path) => Attributes(path) is { } attributes
         && (attributes & FileAttributes.Directory) == 0;
-    public string ReadAllText(string path) => File.ReadAllText(path);
+    public string ReadAllText(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        const int maximum = 4 * 1024 * 1024;
+        if (stream.Length > maximum) throw new FormatException("Launcher manifest exceeds 4 MiB.");
+        using var reader = new StreamReader(stream);
+        var content = new System.Text.StringBuilder();
+        var buffer = new char[4096];
+        int count;
+        while ((count = reader.Read(buffer)) > 0)
+        {
+            if (content.Length + count > maximum) throw new FormatException("Launcher manifest exceeds 4 MiB.");
+            content.Append(buffer, 0, count);
+        }
+        return content.ToString();
+    }
     public IEnumerable<string> EnumerateFiles(string path, string pattern) => Directory.EnumerateFiles(path, pattern);
 
     private static FileAttributes? Attributes(string path)

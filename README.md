@@ -10,8 +10,8 @@ machine look neutral: **every RGB lighting ecosystem you enable goes dark**, and
 guest session ends, everything hands back — Synapse/iCUE/GG profiles return and
 the Discord status clears.
 
-**Downloads:** [regular 2.5.0](https://github.com/TypicalTitan/PlaycastCompanion/releases/tag/v2.5.0)
-and [Native 3.2.1](https://github.com/TypicalTitan/PlaycastCompanion-cpp/releases/tag/v3.2.1).
+**Downloads:** [regular 2.5.1](https://github.com/TypicalTitan/PlaycastCompanion/releases/tag/v2.5.1)
+and [Native 3.2.2](https://github.com/TypicalTitan/PlaycastCompanion-cpp/releases/tag/v3.2.2).
 Both include the sidebar, session logger and local log analyzer. Choose one:
 they use the same installation folder and compatible configuration.
 
@@ -193,15 +193,37 @@ The logger accepts diagnostic data only and never executes captured scripts.
 Feed frames are bounded to 1 MiB. Oversized traffic and unreadable or binary
 HTTP request bodies produce drop/omission markers rather than partial scripts.
 
-Local inventory reads Steam library/app manifests and Epic installation
-manifests. It does not claim to cover GOG, Xbox, EA, Ubisoft or standalone
+Local inventory resolves the configured guest account's current SID and Windows
+profile, including suffixes such as `NonsoleMode.000`. Steam starts at that
+profile's `AppData\Local\Playcast\Steam` and follows its library manifests and
+guest registry entries. Epic uses guest-registered manifests and Legendary's
+guest `installed.json`; unrelated owner installations in shared Epic metadata
+are excluded. Junctions are resolved for running-process matching. Protected
+guest files produce explicit coverage gaps, and the owner's library is never
+substituted for unreadable guest inventory. It does not claim to cover GOG, Xbox, EA, Ubisoft or standalone
 games without a Playcast catalog entry. Running-game detection matches
 executables under known install roots in the target Windows session, and
 records access failures and unknown coverage. Playcast's game launch state
 and running-window list are additional signals, not proof that every game
 process was observed.
 
-Snapshots run every 30 seconds by default. Category files rotate at 10 MiB;
+Snapshots run every 30 seconds by default. Each session also gets a bounded final
+snapshot (`phase: sessionEnd`) after backend cleanup, including sessions shorter
+than the normal interval. Failed or timed-out capture records unknown inventory
+and fresh Companion resource observations. Inaccessible Playcast processes remain
+listed with unavailable metrics and partial process coverage. Chroma cleanup
+reports the actual HTTP outcome, and Dynamic Lighting cancellation/retries retain
+at most one pending operation.
+
+Companion cannot switch on development-only native Playcast log files in stock
+Release binaries. PlaycastService, Playjector, PlayjectorHelper and
+ElevationPolicyAgent skip file-logger initialization in Release, and shared
+Warning/Info/Debug log calls are compiled out. Full native diagnostics requires
+updated Playcast binaries with a separate logging-only runtime control. The
+Companion secrets checkbox changes captured-record redaction; it does not enable
+those native loggers or developer mode.
+
+Category files rotate at 10 MiB;
 each session is capped at 100 MiB, with an explicit limit marker when capture
 stops. Expired generated session folders are removed after 14 days when a
 new session starts. Session folders permit only their owner and SYSTEM;

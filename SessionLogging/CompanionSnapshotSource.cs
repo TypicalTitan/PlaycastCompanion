@@ -4,7 +4,7 @@ using System.Text.Json.Nodes;
 namespace PlaycastCompanion;
 
 /// <summary>Adds the Companion backends' public status to passive machine snapshots.</summary>
-public sealed class CompanionSnapshotSource : ISessionSnapshotSource
+public sealed class CompanionSnapshotSource : ISessionSnapshotSource, ITerminalSnapshotFallbackSource
 {
     private readonly ISessionSnapshotSource _machine;
     private readonly IReadOnlyList<ILightingBackend> _lighting;
@@ -23,6 +23,14 @@ public sealed class CompanionSnapshotSource : ISessionSnapshotSource
     public async ValueTask<object> CaptureAsync(CancellationToken cancellationToken)
     {
         var snapshot = await _machine.CaptureAsync(cancellationToken).ConfigureAwait(false);
+        return AddBackendStatus(snapshot);
+    }
+
+    public object CaptureTerminalFallback(string error) =>
+        AddBackendStatus(MachineSnapshotSource.CaptureTerminalFallback(error));
+
+    private object AddBackendStatus(object snapshot)
+    {
         var root = JsonSerializer.SerializeToNode(snapshot) as JsonObject ?? new JsonObject();
         root["companionBackends"] = JsonSerializer.SerializeToNode(new
         {

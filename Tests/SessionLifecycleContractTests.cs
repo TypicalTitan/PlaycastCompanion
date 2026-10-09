@@ -42,6 +42,7 @@ public static class SessionLifecycleContractTests
         logger.UpdateSession(true, "replaced Windows guest session", "99");
         var second = logger.LogDirectory;
         Check(first != second, "Changed Windows guest IDs must rotate the active session directory.");
+        await WaitFor(() => SessionLogContractTests.ReadAll(first).Contains("sessionEnded"));
         Check(SessionLogContractTests.ReadAll(first).Contains("Guest session identity changed"), "Identity rotation needs a clear session-end reason.");
         await logger.StopAsync();
     }
@@ -56,6 +57,7 @@ public static class SessionLifecycleContractTests
         logger.Record("realtime", new { shouldNotAppear = true });
         logger.UpdateSession(true, "config changed", "42");
         Check(!SessionLogContractTests.ReadAll(first).Contains("shouldNotAppear"), "Disabling logging must immediately prevent future writes.");
+        await WaitFor(() => SessionLogContractTests.ReadAll(first).Contains("sessionEnded"));
         Check(SessionLogContractTests.ReadAll(first).Contains("Session logging disabled"), "Disabling needs a session-end marker.");
         config.SessionLogging.Enabled = true;
         logger.UpdateSession(true, "enabled", "42");

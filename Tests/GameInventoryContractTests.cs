@@ -14,6 +14,13 @@ public static class GameInventoryContractTests
         RejectsEscapedInstallDirectory();
         MatchesOnlyWithinInstallRootBoundary();
         HonorsCancellation();
+        UsesCurrentGuestProfileAndExcludesOwnerLibraries();
+        ReadsGuestLegendaryMetadata();
+        DeniedGuestLibraryDoesNotFallBackToOwner();
+        ExpandsLauncherPathsUsingGuestVariables();
+        ReadsCanonicalLegendaryAndDeduplicatesWindowsPaths();
+        PreservesDeniedLegendarySourceAndMidScanCancellation();
+        FiltersCommonEpicMetadataEvenWhenRegisteredByGuest();
     }
 
     private static void FindsSteamGamesAcrossModernAndLegacyLibraries()
@@ -102,8 +109,134 @@ public static class GameInventoryContractTests
         throw new InvalidOperationException("Canceled inventory capture must stop immediately.");
     }
 
+    private static void UsesCurrentGuestProfileAndExcludesOwnerLibraries()
+    {
+        const string profile = @"C:\Users\NonsoleMode.000";
+        var locations = TargetGameLocations.ForProfile(profile);
+        Check(locations.SteamRoots.SequenceEqual(new[] { profile + @"\AppData\Local\Playcast\Steam" }),
+            "Steam discovery must use the resolved current profile, including a Windows profile suffix.");
+        var files = new FakeInventoryFiles();
+        files.AddSteam(locations.SteamRoots[0], "guest", "Guest Game", "Guest");
+        files.AddSteam(@"C:\Program Files (x86)\Steam", "owner", "Owner Game", "Owner");
+        var manifests = @"C:\SharedEpicMetadata";
+        files.AddFile(manifests + @"\owner.item", JsonSerializer.Serialize(new
+            { AppName = "owner", DisplayName = "Owner Epic", InstallLocation = @"C:\OwnerGames\Epic" }));
+        files.AddFile(manifests + @"\guest.item", JsonSerializer.Serialize(new
+            { AppName = "guest-epic", DisplayName = "Guest Epic", InstallLocation = profile + @"\Games\Epic" }));
+        files.Directories.Add(@"C:\OwnerGames\Epic");
+        files.Directories.Add(profile + @"\Games\Epic");
+        var result = new GameInventorySource(files, locations with { EpicManifests = manifests }).Capture(CancellationToken.None);
+        Check(result.Games.Count == 2 && result.Games.All(game => game.Id != "owner"),
+            "Owner Steam and unrelated machine-wide Epic installs must not become guest installations.");
+        var registered = TargetGameLocations.ForProfile(profile, @"D:\GuestSteam", manifests);
+        Check(registered.SteamRoots.Contains(@"D:\GuestSteam") && !registered.FilterSharedEpic,
+            "Launcher paths explicitly registered by the guest must remain usable outside its profile.");
+    }
+
+    private static void ReadsGuestLegendaryMetadata()
+    {
+        var files = new FakeInventoryFiles();
+        var locations = TargetGameLocations.ForProfile(@"C:\Users\NonsoleMode.000");
+        files.AddFile(locations.LegendaryInstalled, JsonSerializer.Serialize(new
+        {
+            epicGuest = new { app_name = "epic-guest", title = "Guest Legendary Game", install_path = @"D:\Playcast\Epic\Guest" },
+            missing = new { app_name = "missing", title = "Missing", install_path = @"D:\Playcast\Epic\Deleted" }
+        }));
+        files.Directories.Add(@"D:\Playcast\Epic\Guest");
+        var result = new GameInventorySource(files, locations).Capture(CancellationToken.None);
+        Check(result.Games.Count == 1 && result.Games[0].ManifestPath == locations.LegendaryInstalled
+            && result.Games[0].InstallRoot == @"D:\Playcast\Epic\Guest",
+            "Legendary inventory must use the guest's installed.json and its recorded installation location.");
+        Check(result.Sources.Any(source => source.Source == locations.LegendaryInstalled && source.Status == "partial"),
+            "Missing Legendary installation directories must preserve partial coverage.");
+    }
+
+    private static void DeniedGuestLibraryDoesNotFallBackToOwner()
+    {
+        var files = new FakeInventoryFiles();
+        var locations = TargetGameLocations.ForProfile(@"C:\Users\NonsoleMode.000");
+        files.AddSteam(locations.SteamRoots[0], "guest", "Guest", "Guest");
+        files.AddSteam(@"C:\Program Files (x86)\Steam", "owner", "Owner", "Owner");
+        files.DeniedDirectories.Add(locations.SteamRoots[0] + @"\steamapps");
+        var result = new GameInventorySource(files, locations).Capture(CancellationToken.None);
+        Check(result.Games.Count == 0 && result.Sources.Any(source => source.Status == "access_denied"),
+            "A protected guest library must report unavailable data without substituting an owner inventory.");
+    }
+
     private static GameInventorySource Source(FakeInventoryFiles files) =>
         new(files, new[] { @"C:\Steam" }, @"C:\EpicManifests");
+
+    private static void ExpandsLauncherPathsUsingGuestVariables()
+    {
+        const string profile = @"C:\Users\NonsoleMode.009";
+        var paths = TargetGameLocations.ForProfile(profile, @"%LOCALAPPDATA%\GuestSteam", @"%APPDATA%\EpicMetadata");
+        Check(paths.SteamRoots.Contains(profile + @"\AppData\Local\GuestSteam")
+            && paths.EpicManifests == profile + @"\AppData\Roaming\EpicMetadata",
+            "Guest launcher variables expanded to another account's profile.");
+        var unknown = TargetGameLocations.ForProfile(profile, @"%TEMP%\Steam", @"%UNKNOWN_GUEST_PATH%\Epic");
+        Check(unknown.SteamRoots.Count == 1 && unknown.FilterSharedEpic
+            && unknown.Sources.SelectMany(source => source.Errors).Count(error => error.Status == "unavailable") == 2,
+            "Unresolved launcher variables were accepted or silently replaced by owner paths.");
+        var system = TargetGameLocations.ForProfile(@"%SystemDrive%\Users\NonsoleMode.009");
+        Check(system.SteamRoots[0].StartsWith(Path.GetPathRoot(Environment.SystemDirectory)!, StringComparison.OrdinalIgnoreCase),
+            "SystemDrive profile expansion failed.");
+    }
+
+    private static void ReadsCanonicalLegendaryAndDeduplicatesWindowsPaths()
+    {
+        var files = new FakeInventoryFiles();
+        var locations = TargetGameLocations.ForProfile(@"C:\Users\NonsoleMode.009");
+        var canonical = locations.LegendaryCandidates.Single(path => path.EndsWith(@"Playcast\LegendaryConfig\installed.json"));
+        files.AddFile(locations.LegendaryInstalled, JsonSerializer.Serialize(new
+            { guest = new { app_name = "epic-guest", title = "Guest", install_path = @"D:\Playcast\Epic\Guest" } }));
+        files.AddFile(canonical, JsonSerializer.Serialize(new
+            { guest = new { app_name = "epic-guest", title = "Guest canonical", install_path = @"d:\playcast\EPIC\guest" } }));
+        files.Directories.Add(@"D:\Playcast\Epic\Guest");
+        var result = new GameInventorySource(files, locations with
+        {
+            LegendaryInstalled = "", // Explicit guest registry path unavailable after hive unload.
+            Sources = [new("target_registry_hive", "not_loaded", 0, [])]
+        }).Capture(CancellationToken.None);
+        Check(result.Games.Count == 1 && result.Sources.Any(source => source.Source == canonical && source.Status == "available"),
+            "Canonical Playcast Legendary metadata was missed or casing duplicated one installation.");
+        Check(result.Sources.Any(source => source.Status == "not_loaded"), "Unavailable guest registry coverage was lost.");
+    }
+
+    private static void PreservesDeniedLegendarySourceAndMidScanCancellation()
+    {
+        var files = new FakeInventoryFiles();
+        var locations = TargetGameLocations.ForProfile(@"C:\Users\NonsoleMode.009");
+        files.AddFile(locations.LegendaryInstalled, "{}");
+        files.DeniedFiles.Add(locations.LegendaryInstalled);
+        var result = new GameInventorySource(files, locations).Capture(CancellationToken.None);
+        Check(result.Sources.Any(source => source.Source == locations.LegendaryInstalled && source.Status == "access_denied"),
+            "Denied guest Legendary metadata was reported as an empty inventory.");
+        using var stop = new CancellationTokenSource();
+        var cancelling = new FakeInventoryFiles();
+        cancelling.AddSteam(@"C:\Steam", "1", "One", "One");
+        cancelling.OnRead = stop.Cancel;
+        try { Source(cancelling).Capture(stop.Token); }
+        catch (OperationCanceledException) { return; }
+        throw new InvalidOperationException("Cancellation during the final manifest was swallowed.");
+    }
+
+    private static void FiltersCommonEpicMetadataEvenWhenRegisteredByGuest()
+    {
+        const string profile = @"C:\Users\NonsoleMode.009";
+        var shared = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "Epic", "EpicGamesLauncher", "Data", "Manifests");
+        var locations = TargetGameLocations.ForProfile(profile, registeredEpic: shared.ToLowerInvariant() + @"\..\Manifests");
+        Check(locations.FilterSharedEpic, "Registering machine-wide Epic metadata disabled account ownership filtering.");
+        var files = new FakeInventoryFiles();
+        files.AddFile(Path.Combine(shared, "owner.item"), JsonSerializer.Serialize(new
+            { AppName = "owner", DisplayName = "Owner", InstallLocation = @"D:\OwnerGames\Unrelated" }));
+        files.AddFile(Path.Combine(shared, "guest.item"), JsonSerializer.Serialize(new
+            { AppName = "guest", DisplayName = "Guest", InstallLocation = profile + @"\Games\One" }));
+        files.Directories.Add(@"D:\OwnerGames\Unrelated");
+        files.Directories.Add(profile + @"\Games\One");
+        var result = new GameInventorySource(files, locations).Capture(CancellationToken.None);
+        Check(result.Games.Count == 1 && result.Games[0].Id == "guest", "Owner games leaked from common Epic manifests.");
+    }
 
     private static void Check(bool success, string message)
     {
@@ -114,10 +247,17 @@ public static class GameInventoryContractTests
     {
         public HashSet<string> Directories { get; } = new(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> DeniedDirectories { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> DeniedFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Action? OnRead;
         private readonly Dictionary<string, string> _content = new(StringComparer.OrdinalIgnoreCase);
         public bool DirectoryExists(string path) => Directories.Contains(Path.GetFullPath(path));
         public bool FileExists(string path) => _content.ContainsKey(Path.GetFullPath(path));
-        public string ReadAllText(string path) => _content[Path.GetFullPath(path)];
+        public string ReadAllText(string path)
+        {
+            OnRead?.Invoke();
+            if (DeniedFiles.Contains(path)) throw new UnauthorizedAccessException("Synthetic denied manifest.");
+            return _content[Path.GetFullPath(path)];
+        }
 
         public IEnumerable<string> EnumerateFiles(string path, string pattern)
         {
