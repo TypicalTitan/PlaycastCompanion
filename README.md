@@ -182,7 +182,9 @@ Files contain one timestamped JSON object per line:
 
 **Full realtime and script capture requires the Playcast host diagnostic hook.**
 Rebuild both `host-frontend` and `host-electron` from `playcast-apps-1` with
-the hook included; a stock Playcast release does not expose that feed.
+the hook included; a stock Playcast release does not expose that feed. The hook
+source is pushed as an [applyable patch](https://github.com/TypicalTitan/playcast-apps/tree/codex/companion-session-diagnostics)
+in the personal Playcast repository.
 The guest host sends an ACL-protected, local named-pipe feed to the Companion
 instance in the owner's account. Keep owner Companion running for realtime
 capture. The headless guest instance records its own machine snapshots in
